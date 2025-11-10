@@ -6,7 +6,7 @@
 require_once 'config/database.php';
 require_once 'vendor/autoload.php';
 require_once 'config/email.php';
-
+require_once __DIR__ . '/notification_utils.php';
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
 
@@ -103,16 +103,3 @@ function sendEmail(array $n, array $cfg): bool
     }
 }
 
-/* ------------------------------------------------------------------ */
-function updateJobHeartbeat($pdo, $job_code, $status, $details) {
-    $now = date('Y-m-d H:i:s');
-    $pdo->prepare("
-        INSERT INTO system_jobs (job_code, last_run_at, status, details, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-            last_run_at = VALUES(last_run_at),
-            status = VALUES(status),
-            details = VALUES(details),
-            updated_at = VALUES(updated_at)
-    ")->execute([$job_code, $now, $status, $details, $now]);
-}

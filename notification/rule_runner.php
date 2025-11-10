@@ -3,14 +3,15 @@
  * Rule Runner - Cron job to execute scheduled SQL rules
  * 
  * Run this every 10 minutes via crontab:
- * * /10 * * * * notification/rule_runner.php
+ * * /10 * * * * php /path/to/notification/rule_runner.php
  */
 
-require_once 'config/database.php'; // Your DB connection
-require_once 'NotificationEngine.php';
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/NotificationEngine.php';
+require_once __DIR__ . '/notification_utils.php';
 
 // Create DB connection
-$pdo = getDatabaseConnection(); // Your connection function
+$pdo = getDatabaseConnection();
 
 // Initialize engine
 $engine = new NotificationEngine($pdo);
@@ -30,7 +31,7 @@ try {
     $issues_raised = 0;
     
     while ($rule = $stmt->fetch(PDO::FETCH_ASSOC)) {
-        echo "Processing rule: {$rule['code']}\n";
+        logNotificationActivity("Processing rule: {$rule['code']}", 'INFO');
         
         try {
             // Execute the detection SQL
@@ -41,7 +42,7 @@ try {
                 // Optional: custom_title, custom_body
                 
                 $entity_id = $row['entity_id'];
-                $recipient_user_id = $row['recipient_user_id'];
+                $recipient_user_id = $row['recipient_user_id'] ?? null;
                 $context_json = $row['context_json'];
                 $custom_title = $row['custom_title'] ?? null;
                 $custom_body = $row['custom_body'] ?? null;
@@ -62,36 +63,19 @@ try {
             $rules_processed++;
             
         } catch (Exception $e) {
-            echo "Error in rule {$rule['code']}: {$e->getMessage()}\n";
-            updateJobHeartbeat($pdo, 'RULE_RUNNER', 'ERROR', "Error in rule {$rule['code']}: {$e->getMessage()}");
+            $error_msg = "Error in rule {$rule['code']}: {$e->getMessage()}";
+            logNotificationActivity($error_msg, 'ERROR');
+            updateJobHeartbeat($pdo, 'RULE_RUNNER', 'WARNING', $error_msg);
         }
     }
     
     $message = "Processed {$rules_processed} rules, raised {$issues_raised} issues";
-    echo $message . "\n";
+    logNotificationActivity($message, 'INFO');
     updateJobHeartbeat($pdo, 'RULE_RUNNER', 'OK', $message);
     
 } catch (Exception $e) {
-    echo "Fatal error: {$e->getMessage()}\n";
-    updateJobHeartbeat($pdo, 'RULE_RUNNER', 'ERROR', $e->getMessage());
+    $error_msg = "Fatal error: {$e->getMessage()}";
+    logNotificationActivity($error_msg, 'ERROR');
+    updateJobHeartbeat($pdo, 'RULE_RUNNER', 'ERROR', $error_msg);
+    exit(1);
 }
-
-/**
- * Update job heartbeat in system_jobs table
- */
-function updateJobHeartbeat($pdo, $job_code, $status, $details) {
-    $now = date('Y-m-d H:i:s');
-    
-    $stmt = $pdo->prepare("
-        INSERT INTO system_jobs (job_code, last_run_at, status, details) 
-        VALUES (?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE 
-            last_run_at = VALUES(last_run_at),
-            status = VALUES(status),
-            details = VALUES(details)
-    ");
-    $stmt->execute([$job_code, $now, $status, $details]);
-}
-
-
-?>
