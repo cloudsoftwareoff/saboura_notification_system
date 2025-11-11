@@ -1,31 +1,31 @@
 <?php
 /**
- * Rule Runner - Executes SCHEDULED_SQL rules ONLY when their cron expression is due
- * 
- * Run every minute (or every 5/10 min) via crontab:
- * 
- * * /1 * * * * php /path/to/notification/rule_runner.php >> /var/log/rule_runner.log 2>&1
+ * Rule Runner - Executes SCHEDULED_SQL rules using DATABASE last_run tracking
+ * Run every minute via crontab
  */
 
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/NotificationEngine.php';
 require_once __DIR__ . '/notification_utils.php';
 require_once __DIR__ . '/../vendor/autoload.php';
-
+require_once __DIR__ . '/../audit_log.php';
 use Cron\CronExpression;
 
-date_default_timezone_set('Africa/Tunis'); // Tunisia time
+date_default_timezone_set('Africa/Tunis'); 
 
 $pdo = getDatabaseConnection();
 $engine = new NotificationEngine($pdo);
 
-// Heartbeat
+// BLOCK BROWSER ACCESS
+if (php_sapi_name() !== 'cli' && !isset($_SERVER['HTTP_X_CRON_AUTH'])) {
+    http_response_code(403);
+    die('Forbidden. Cron only.');
+}
+
 updateJobHeartbeat($pdo, 'RULE_RUNNER', 'OK', 'Starting scheduled rule check');
 
 $now = new DateTimeImmutable('now', new DateTimeZone('Africa/Tunis'));
-$stateDir = __DIR__ . '/.last_runs';
-if (!is_dir($stateDir))
-    mkdir($stateDir, 0755, true);
+$nowTs = $now->getTimestamp();
 
 try {
     $stmt = $pdo->prepare("
@@ -44,20 +44,18 @@ try {
     while ($rule = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $ruleId = $rule['id'];
         $code = $rule['code'];
-        $lastRunFile = "$stateDir/rule_{$ruleId}.txt";
 
         logNotificationActivity("Checking rule: {$code} | Cron: {$rule['schedule_expression']}");
 
         try {
             $cron = CronExpression::factory($rule['schedule_expression']);
-            $lastDue = $cron->getPreviousRunDate($now, 0, true); // DateTimeImmutable
+            $lastDue = $cron->getPreviousRunDate($now, 0, true);
             $lastDueTs = $lastDue->getTimestamp();
 
-            $lastExecutedTs = file_exists($lastRunFile)
-                ? (int) trim(file_get_contents($lastRunFile))
-                : 0;
+            // Get DB state
+            $lastExecutedTs = $rule['last_due_ts'] ? (int)$rule['last_due_ts'] : 0;
 
-            // Optional: respect cooldown even if cron says run
+            // Cooldown check
             $cooldownSec = ($rule['cooldown_minutes'] ?? 60) * 60;
             $tooSoon = (time() - $lastExecutedTs) < $cooldownSec;
 
@@ -72,15 +70,16 @@ try {
             $detection_stmt = $pdo->prepare($rule['detection_sql']);
             $detection_stmt->execute();
 
+            $rowCount = 0;
             while ($row = $detection_stmt->fetch(PDO::FETCH_ASSOC)) {
+                $rowCount++;
                 $entity_id = $row['entity_id'] ?? null;
                 $recipient_user_id = $row['recipient_user_id'] ?? null;
                 $context_json = $row['context_json'] ?? '{}';
                 $custom_title = $row['custom_title'] ?? null;
                 $custom_body = $row['custom_body'] ?? null;
 
-                if (!$entity_id)
-                    continue;
+                if (!$entity_id) continue;
 
                 $engine->raiseIssue(
                     $rule,
@@ -94,9 +93,17 @@ try {
                 $issues_raised++;
             }
 
-            // Mark as executed
-            file_put_contents($lastRunFile, $lastDueTs);
+            // === UPDATE DB: Mark as executed ===
+            $updateStmt = $pdo->prepare("
+                UPDATE notification_rules 
+                SET last_executed_at = NOW(),
+                    last_due_ts = ?
+                WHERE id = ?
+            ");
+            $updateStmt->execute([$lastDueTs, $ruleId]);
+
             $rules_triggered++;
+            logNotificationActivity("Rule {$code}: EXECUTED → {$rowCount} rows processed", 'INFO');
 
         } catch (Exception $e) {
             $msg = "Error in rule {$code}: " . $e->getMessage();

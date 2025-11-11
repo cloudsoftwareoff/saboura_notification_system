@@ -1,0 +1,403 @@
+1. Outline for the Developer
+1.1 Objective
+Build a config-driven notification & alert framework inside Saboura that:
+* Continuously monitors the database via SQL rules.
+* Treats each row from a query as an alert.
+* Creates issues and notifications automatically.
+* Tracks status, assignment, and resolution.
+* Allows new rules and alerts to be added by configuration only (DB inserts), without code changes.
+This framework should help Saboura govern itself: detect problems early, assign them to the right person, and prove that issues are handled.
+
+1.2 Core Components
+1. Database tables
+o notification_rules - configuration of rules (SQL + templates).
+o notification_issues - list of detected problems (alerts).
+o notifications - actual messages sent to users.
+o system_jobs - last run times & status of background jobs.
+2. Background jobs (cron / workers)
+o Rule Runner - executes configured SQL rules and raises issues.
+o Notification Dispatcher - sends messages from notifications via channels.
+o (Optional later) Escalation Monitor - escalates unresolved critical issues.
+3. Template engine
+o Simple text replacement ({{key}}) using JSON data from queries.
+4. Event processor (future-proof)
+o processEvent(event_code, payload) for event-based rules like payment failures.
+5. User interfaces
+o Admin Alerts Center (all issues, filters, actions).
+o Assistant/Teacher Notification Inbox.
+o Bell icon with unread count in their portals.
+
+1.3 Data Flow (high level)
+1. Cron runs a rule ? executes its configured SQL.
+2. Each row returned:
+o Contains entity_id, recipient_user_id, context_json, optional custom title/body.
+3. Engine:
+o Finds or creates a notification_issue.
+o Applies cooldown & snooze.
+o Creates notifications for each configured channel/user.
+4. Dispatcher sends them and updates status (PENDING ? SENT ? READ).
+5. Users see alerts in the UI and can:
+o Mark as In Progress, Resolved, Ignored, or Snooze.
+6. Reports and dashboards use this data to show system health.
+
+1.4 Phased Implementation
+Phase 1 - Backend Core
+* Implement DB tables.
+* Implement Rule Runner (scheduled SQL rules).
+* Implement Notification Dispatcher.
+* Implement simple template rendering.
+* Seed 3-5 initial rules.
+Phase 2 - UI & User actions
+* Admin Alerts Center.
+* Assistant/Teacher notifications inbox + bell.
+* Actions on issues (status changes, assign, snooze).
+Phase 3 - Advanced features
+* Event-based rules (processEvent for payment failed, etc.).
+* Escalation logic.
+* Reports (assistant performance, system health, etc.).
+
+2. Detailed Solution for the Developer
+2.1 Database Design
+2.1.1 notification_rules - rule configuration
+Each row defines one rule. The logic is data, not code.
+CREATE TABLE notification_rules (
+    id                     INT AUTO_INCREMENT PRIMARY KEY,
+    code                   VARCHAR(100) UNIQUE NOT NULL,      -- e.g. 'NO_SESSION_PLANNED'
+    name                   VARCHAR(255) NOT NULL,
+    description            TEXT,
+    severity               ENUM('INFO','WARNING','CRITICAL') NOT NULL DEFAULT 'WARNING',
+
+    -- How this rule is triggered
+    condition_type         ENUM('SCHEDULED_SQL','EVENT_BASED') NOT NULL,
+    detection_sql          MEDIUMTEXT NULL,                   -- for SCHEDULED_SQL rules
+    schedule_expression    VARCHAR(100) NULL,                 -- e.g. '*/10 * * * *' (optional metadata)
+
+    event_code             VARCHAR(100) NULL,                 -- for EVENT_BASED rules
+    event_filter_json      JSON NULL,                         -- optional payload filters
+
+    -- What the rule is about
+    entity_type            VARCHAR(50) NOT NULL,              -- 'STUDENT','GROUP','SESSION','PAYMENT', etc.
+
+    -- How to interpret SQL/event output
+    entity_id_field        VARCHAR(100) NOT NULL DEFAULT 'entity_id',
+    assignee_user_field    VARCHAR(100) NULL,                 -- usually 'recipient_user_id'
+
+    -- Who should get notifications
+    target_role            ENUM('ASSISTANT','TEACHER','ADMIN','CEO','MIX') NOT NULL,
+    channels_json          JSON NOT NULL,                     -- e.g. '["IN_APP","EMAIL"]'
+
+    -- Templates
+    title_template         VARCHAR(255) NOT NULL,
+    body_template          MEDIUMTEXT NOT NULL,
+
+    cooldown_minutes       INT NOT NULL DEFAULT 60,
+    is_active              TINYINT(1) NOT NULL DEFAULT 1,
+
+    created_at             DATETIME NOT NULL,
+    updated_at             DATETIME NOT NULL
+);
+For SCHEDULED_SQL rules, detection_sql must return (per row):
+* entity_id (INT)
+* recipient_user_id (INT)
+* context_json (JSON string)
+* Optional: custom_title, custom_body
+
+2.1.2 notification_issues - tracked problems/alerts
+CREATE TABLE notification_issues (
+    id                      INT AUTO_INCREMENT PRIMARY KEY,
+    rule_id                 INT NOT NULL,
+    entity_type             VARCHAR(50) NOT NULL,
+    entity_id               INT NOT NULL,
+    title                   VARCHAR(255) NOT NULL,
+    context_json            JSON NOT NULL,
+    severity                ENUM('INFO','WARNING','CRITICAL') NOT NULL,
+    status                  ENUM('OPEN','IN_PROGRESS','RESOLVED','IGNORED') NOT NULL DEFAULT 'OPEN',
+    assigned_to_user_id     INT NULL,
+    first_detected_at       DATETIME NOT NULL,
+    last_detected_at        DATETIME NOT NULL,
+    resolved_at             DATETIME NULL,
+    resolution_notes        TEXT NULL,
+    snoozed_until           DATETIME NULL,
+    escalation_level        INT NOT NULL DEFAULT 0,
+    created_at              DATETIME NOT NULL,
+    updated_at              DATETIME NOT NULL,
+
+    UNIQUE KEY uniq_issue (rule_id, entity_type, entity_id),
+    FOREIGN KEY (rule_id) REFERENCES notification_rules(id)
+);
+
+2.1.3 notifications - messages sent to users
+CREATE TABLE notifications (
+    id                      INT AUTO_INCREMENT PRIMARY KEY,
+    issue_id                INT NULL,
+    rule_id                 INT NOT NULL,
+    recipient_user_id       INT NOT NULL,
+    channel                 ENUM('IN_APP','EMAIL','WHATSAPP') NOT NULL,
+    message_title           VARCHAR(255) NOT NULL,
+    message_body            TEXT NOT NULL,
+    status                  ENUM('PENDING','SENT','DELIVERED','READ','FAILED') NOT NULL DEFAULT 'PENDING',
+    error_message           TEXT NULL,
+    sent_at                 DATETIME NULL,
+    delivered_at            DATETIME NULL,
+    read_at                 DATETIME NULL,
+    created_at              DATETIME NOT NULL,
+    updated_at              DATETIME NOT NULL,
+
+    FOREIGN KEY (issue_id) REFERENCES notification_issues(id),
+    FOREIGN KEY (rule_id) REFERENCES notification_rules(id)
+);
+
+2.1.4 system_jobs - job heartbeats
+CREATE TABLE system_jobs (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    job_code        VARCHAR(100) UNIQUE NOT NULL,  -- e.g. 'RULE_RUNNER','NOTIF_DISPATCHER'
+    last_run_at     DATETIME NOT NULL,
+    status          ENUM('OK','WARNING','ERROR') NOT NULL DEFAULT 'OK',
+    details         TEXT NULL,
+    updated_at      DATETIME NOT NULL
+);
+
+2.2 Contract for SQL Rule Output
+For any SCHEDULED_SQL rule, detection_sql must return per row:
+* entity_id - the ID of the object concerned.
+* recipient_user_id - user ID of who should get the notification.
+* context_json - JSON string with additional info.
+Optional:
+* custom_title - string; overrides template if not NULL.
+* custom_body - string; overrides template if not NULL.
+Example query (NO_SESSION_PLANNED):
+SELECT
+    s.id AS entity_id,
+    s.assistant_id AS recipient_user_id,
+    JSON_OBJECT(
+        'student_id', s.id,
+        'student_name', s.full_name,
+        'assistant_id', s.assistant_id,
+        'subscription_id', sub.id,
+        'subscription_start', DATE_FORMAT(sub.start_date, '%Y-%m-%d'),
+        'subscription_end', DATE_FORMAT(sub.end_date, '%Y-%m-%d'),
+        'days_without_session', 3
+    ) AS context_json,
+    CONCAT('No sessions planned for student ', s.full_name) AS custom_title,
+    NULL AS custom_body
+FROM students s
+JOIN subscriptions sub ON sub.student_id = s.id
+WHERE sub.status = 'ACTIVE'
+  AND NOT EXISTS (
+      SELECT 1 FROM sessions sess
+      WHERE sess.student_id = s.id
+        AND sess.start_time BETWEEN NOW() AND NOW() + INTERVAL 3 DAY
+  );
+
+2.3 Background Jobs
+2.3.1 Rule Runner (cron) - notification_rule_runner
+Frequency: e.g. every 10 minutes.
+Responsibilities:
+1. Update its heartbeat in system_jobs with job_code = 'RULE_RUNNER'.
+2. Load all active rules with condition_type = 'SCHEDULED_SQL'.
+3. For each rule:
+o Optionally check schedule_expression if you want more control.
+o Execute detection_sql.
+o For each row returned, call raiseIssueUsingRule(...).
+Pseudo-code:
+function runScheduledRules():
+    touchSystemJob('RULE_RUNNER')
+
+    rules = getActiveRules(condition_type = 'SCHEDULED_SQL')
+
+    for rule in rules:
+        rows = executeSQL(rule.detection_sql)
+
+        for row in rows:
+            entity_id = row['entity_id']
+            recipient_user_id = row['recipient_user_id']
+            context_json = row['context_json']
+            custom_title = row.get('custom_title')
+            custom_body = row.get('custom_body')
+
+            raiseIssueUsingRule(rule, entity_id, recipient_user_id, context_json, custom_title, custom_body)
+
+2.3.2 Issue Handling - raiseIssueUsingRule(...)
+Goal: unify creation/updating of issues and triggering notifications.
+function raiseIssueUsingRule(rule, entity_id, recipient_user_id, context_json, custom_title, custom_body):
+    now = currentTime()
+    entity_type = rule.entity_type
+
+    issue = findIssue(rule.id, entity_type, entity_id)  // by rule_id + entity_type + entity_id
+
+    if issue exists:
+        // Respect snooze
+        if issue.snoozed_until != null AND issue.snoozed_until > now:
+            issue.last_detected_at = now
+            save(issue)
+            return
+
+        issue.last_detected_at = now
+        save(issue)
+    else:
+        // Render title from template if no custom title
+        title = custom_title ?? renderTemplate(rule.title_template, context_json)
+
+        issue = new NotificationIssue()
+        issue.rule_id = rule.id
+        issue.entity_type = entity_type
+        issue.entity_id = entity_id
+        issue.title = title
+        issue.context_json = context_json
+        issue.severity = rule.severity
+        issue.status = 'OPEN'
+        issue.assigned_to_user_id = recipient_user_id
+        issue.first_detected_at = now
+        issue.last_detected_at = now
+        issue.created_at = now
+        issue.updated_at = now
+        save(issue)
+
+    if shouldSendNotifications(rule, issue, recipient_user_id):
+        createNotifications(rule, issue, recipient_user_id, context_json, custom_title, custom_body)
+shouldSendNotifications checks cooldown (e.g. no repeat alert every 5 minutes for the same issue + recipient).
+
+2.3.3 Notification Creator - createNotifications(...)
+function createNotifications(rule, issue, recipient_user_id, context_json, custom_title, custom_body):
+    now = currentTime()
+    recipients = resolveRecipients(rule, recipient_user_id)
+
+    // Render messages
+    title = custom_title ?? renderTemplate(rule.title_template, context_json)
+    body  = custom_body ?? renderTemplate(rule.body_template,  context_json)
+
+    for user in recipients:
+        for channel in rule.channels_json:
+            if !cooldownPerRecipient(rule, issue, user.id, channel):
+                continue
+
+            notification = new Notification()
+            notification.issue_id = issue.id
+            notification.rule_id = rule.id
+            notification.recipient_user_id = user.id
+            notification.channel = channel
+            notification.message_title = title
+            notification.message_body = body
+            notification.status = 'PENDING'
+            notification.created_at = now
+            notification.updated_at = now
+            save(notification)
+resolveRecipients rules:
+* If rule.target_role = 'ASSISTANT' ? use recipient_user_id.
+* If ADMIN ? fixed list of admin IDs (config table).
+* If MIX ? combine.
+
+2.3.4 Notification Dispatcher - notification_dispatcher
+Frequency: every 1 minute (or faster).
+Responsibilities:
+1. Write heartbeat job_code = 'NOTIF_DISPATCHER' to system_jobs.
+2. Fetch notifications with status = 'PENDING' LIMIT N.
+3. For each notification:
+o Call appropriate sender function.
+o Update status, sent_at, delivered_at, or error_message.
+function runNotificationDispatcher():
+    touchSystemJob('NOTIF_DISPATCHER')
+
+    notifications = getPendingNotifications(limit=100)
+
+    for notif in notifications:
+        try:
+            if notif.channel == 'IN_APP':
+                sendInApp(notif)    // basically just exists in DB; front-end shows it
+            else if notif.channel == 'EMAIL':
+                sendEmail(notif)    // stub/integration later
+            else if notif.channel == 'WHATSAPP':
+                sendWhatsapp(notif) // stub/integration later
+
+            notif.status = 'SENT'
+            notif.sent_at = now
+            save(notif)
+        catch (error):
+            notif.status = 'FAILED'
+            notif.error_message = error.message
+            save(notif)
+
+2.4 Template Rendering
+Implement a simple function:
+* Input: template_string, context_json (parsed to object).
+* Replace {{key}} with value from context.
+Example:
+title_template: "No sessions planned for {{student_name}}"
+
+body_template:
+"Student {{student_name}} (ID: {{student_id}}) has an active subscription ({{subscription_start}}-{{subscription_end}}) but no planned sessions in the next {{days_without_session}} days."
+Pseudo-code:
+function renderTemplate(template, context_json):
+    // context_json is a JSON object
+    for each key, value in context_json:
+        placeholder = '{{' + key + '}}'
+        template = template.replaceAll(placeholder, value.toString())
+    return template
+
+2.5 Event-Based Rules (Future-ready)
+Implement a function:
+function processEvent(event_code, payload):
+    rules = getActiveRules(condition_type = 'EVENT_BASED', event_code = event_code)
+
+    for rule in rules:
+        if !matchesEventFilter(payload, rule.event_filter_json):
+            continue
+
+        entity_id = payload[rule.entity_id_field]
+        assignee_user_id = rule.assignee_user_field ? payload[rule.assignee_user_field] : null
+        context_json = JSON.stringify(payload)
+
+        raiseIssueUsingRule(rule, entity_id, assignee_user_id, context_json, null, null)
+Use from business logic, e.g. after a payment failure:
+NotificationEngine.processEvent('PAYMENT_FAILED', {
+    payment_id: payment.id,
+    student_id: payment.student_id,
+    amount: payment.amount,
+    assistant_id: student.assistant_id
+})
+
+2.6 UI Requirements
+2.6.1 Admin - Alerts Center
+* Route: /admin/notification-issues
+* Features:
+o Filters: status, severity, rule, assignee, date range.
+o Table columns:
+* ID, Rule name, Entity (type+id), Title, Severity, Status, Assigned to, First/Last detected, Age.
+o Actions per issue:
+* Change status: OPEN ? IN_PROGRESS / RESOLVED / IGNORED.
+* Assign to user.
+* Add resolution_notes.
+* Set snoozed_until.
+Backend endpoints (example):
+* GET /api/notification-issues
+* PATCH /api/notification-issues/:id/status
+* PATCH /api/notification-issues/:id/assign
+* PATCH /api/notification-issues/:id/snooze
+
+2.6.2 Assistant/Teacher - My Notifications
+* Route: /assistant/notifications and /teacher/notifications
+* Features:
+o List of notifications for current user:
+* Title, short body, created_at, status (read/unread).
+o Click = full message.
+o Mark as read (sets read_at and changes status to READ).
+Backend endpoints (example):
+* GET /api/my-notifications
+* PATCH /api/notifications/:id/read
+Bell icon:
+* Show count where recipient_user_id = currentUser and read_at IS NULL.
+
+2.7 Initial Rules to Implement (as examples)
+Developer should create SQL seed / migration for:
+1. NEW_SUBSCRIBER_NOT_CONTACTED
+2. NO_SESSION_PLANNED
+3. GROUP_SIZE_VIOLATION
+4. SESSION_NOT_APPROVED_12H
+5. TRIAL_ENDING_TOMORROW
+Each rule:
+* INSERT INTO notification_rules (...) VALUES (...)
+* Include:
+o detection_sql
+o title_template
+o body_template
+o channels_json = ["IN_APP"] for now.

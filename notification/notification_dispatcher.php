@@ -55,6 +55,11 @@ try {
                 $pdo->prepare("UPDATE notifications SET status='SENT', sent_at=NOW() WHERE id=?")
                     ->execute([$notification['id']]);
                 $sent_count++;
+                auditLog($pdo, null, 'NOTIFICATION_SENT', 'notification', $notification['id'], [
+        'channel' => $notification['channel'],
+        'recipient_user_id' => $notification['recipient_user_id'],
+        'title' => $notification['message_title']
+    ]);
             }
         } catch (Throwable $e) {
             $error = $e->getMessage();
