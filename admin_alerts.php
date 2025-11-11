@@ -91,6 +91,8 @@ $severityFilter = $_GET['severity'] ?? '';
 $ruleFilter = $_GET['rule_id'] ?? '';
 $searchQuery = $_GET['search'] ?? '';
 $quickFilter = $_GET['quick'] ?? '';
+$dateFromFilter = $_GET['date_from'] ?? '';
+$dateToFilter = $_GET['date_to'] ?? '';
 
 // Build query
 $sql = "
@@ -145,6 +147,17 @@ if ($searchQuery) {
     $params[] = $searchTerm;
     $params[] = $searchTerm;
     $params[] = $searchTerm;
+}
+
+// Date filters
+if ($dateFromFilter) {
+    $sql .= " AND ni.first_detected_at >= ?";
+    $params[] = $dateFromFilter . ' 00:00:00';
+}
+
+if ($dateToFilter) {
+    $sql .= " AND ni.first_detected_at <= ?";
+    $params[] = $dateToFilter . ' 23:59:59';
 }
 
 $sql .= " ORDER BY 
@@ -267,6 +280,37 @@ $rules = $rulesStmt->fetchAll();
         .note-input-inline.show {
             display: block;
         }
+
+        .date-filter-group {
+            background: #f8f9fa;
+            padding: 0.75rem;
+            border-radius: 0.375rem;
+            border: 1px solid #dee2e6;
+        }
+
+        .date-filter-group label {
+            font-size: 0.875rem;
+            color: #6c757d;
+            margin-bottom: 0.25rem;
+        }
+
+        .date-input-wrapper {
+            position: relative;
+        }
+
+        .date-input-wrapper input[type="date"] {
+            font-size: 0.875rem;
+            padding: 0.375rem 0.75rem;
+        }
+
+        .date-separator {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #6c757d;
+            font-size: 0.875rem;
+            padding: 0 0.5rem;
+        }
     </style>
 </head>
 <body>
@@ -310,6 +354,12 @@ $rules = $rulesStmt->fetchAll();
                     onclick="applyQuickFilter('my_issues')">
                 <i class="fas fa-user"></i> My Issues
             </button>
+            <button class="btn btn-outline-success quick-filter-btn" onclick="applyDateFilter('last_7_days')">
+                <i class="fas fa-calendar-week"></i> Last 7 Days
+            </button>
+            <button class="btn btn-outline-success quick-filter-btn" onclick="applyDateFilter('last_30_days')">
+                <i class="fas fa-calendar-alt"></i> Last 30 Days
+            </button>
             <button class="btn btn-outline-dark quick-filter-btn" onclick="clearAllFilters()">
                 <i class="fas fa-times"></i> Clear All
             </button>
@@ -330,7 +380,28 @@ $rules = $rulesStmt->fetchAll();
                             </button>
                         </div>
                     </div>
-                    
+
+                    <div class="col-md-4">
+                        <label class="form-label">Date Range</label>
+                        <div class="date-filter-group">
+                            <div class="row g-2 align-items-center">
+                                <div class="col">
+                                    <input type="date" name="date_from" class="form-control form-control-sm" 
+                                           value="<?= htmlspecialchars($dateFromFilter) ?>"
+                                           placeholder="From">
+                                </div>
+                                <div class="col-auto date-separator">
+                                    <i class="fas fa-arrow-right"></i>
+                                </div>
+                                <div class="col">
+                                    <input type="date" name="date_to" class="form-control form-control-sm" 
+                                           value="<?= htmlspecialchars($dateToFilter) ?>"
+                                           placeholder="To">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="col-md-2">
                         <label class="form-label">Status</label>
                         <select name="status" class="form-select">
@@ -342,7 +413,7 @@ $rules = $rulesStmt->fetchAll();
                         </select>
                     </div>
                     
-                    <div class="col-md-2">
+                    <div class="col-md-1">
                         <label class="form-label">Severity</label>
                         <select name="severity" class="form-select">
                             <option value="">All</option>
@@ -352,21 +423,11 @@ $rules = $rulesStmt->fetchAll();
                         </select>
                     </div>
                     
-                    <div class="col-md-3">
-                        <label class="form-label">Rule</label>
-                        <select name="rule_id" class="form-select">
-                            <option value="">All Rules</option>
-                            <?php foreach ($rules as $rule): ?>
-                                <option value="<?= $rule['id'] ?>" <?= $ruleFilter == $rule['id'] ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($rule['name']) ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    
                     <div class="col-md-1">
                         <label class="form-label">&nbsp;</label>
-                        <button type="submit" class="btn btn-primary w-100">Filter</button>
+                        <button type="submit" class="btn btn-primary w-100">
+                            <i class="fas fa-filter"></i> Filter
+                        </button>
                     </div>
                 </form>
             </div>
@@ -754,6 +815,30 @@ $rules = $rulesStmt->fetchAll();
         
         function clearAllFilters() {
             window.location.href = 'admin_alerts.php';
+        }
+
+        function applyDateFilter(preset) {
+            const url = new URL(window.location.href);
+            const today = new Date();
+            let dateFrom, dateTo;
+            
+            switch(preset) {
+                case 'last_7_days':
+                    dateFrom = new Date(today);
+                    dateFrom.setDate(today.getDate() - 7);
+                    dateTo = today;
+                    break;
+                case 'last_30_days':
+                    dateFrom = new Date(today);
+                    dateFrom.setDate(today.getDate() - 30);
+                    dateTo = today;
+                    break;
+            }
+            
+            url.searchParams.set('date_from', dateFrom.toISOString().split('T')[0]);
+            url.searchParams.set('date_to', dateTo.toISOString().split('T')[0]);
+            
+            window.location.href = url.toString();
         }
         
         // Single issue actions

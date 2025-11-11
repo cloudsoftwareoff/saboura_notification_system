@@ -1,53 +1,87 @@
 <?php
 /**
- * Rule Runner - Cron job to execute scheduled SQL rules
+ * Rule Runner - Executes SCHEDULED_SQL rules ONLY when their cron expression is due
  * 
- * Run this every 10 minutes via crontab:
- * * /10 * * * * php /path/to/notification/rule_runner.php
+ * Run every minute (or every 5/10 min) via crontab:
+ * 
+ * * /1 * * * * php /path/to/notification/rule_runner.php >> /var/log/rule_runner.log 2>&1
  */
 
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/NotificationEngine.php';
 require_once __DIR__ . '/notification_utils.php';
+require_once __DIR__ . '/../vendor/autoload.php';
 
-// Create DB connection
+use Cron\CronExpression;
+
+date_default_timezone_set('Africa/Tunis'); // Tunisia time
+
 $pdo = getDatabaseConnection();
-
-// Initialize engine
 $engine = new NotificationEngine($pdo);
 
-// Update job heartbeat
-updateJobHeartbeat($pdo, 'RULE_RUNNER', 'OK', 'Starting rule execution');
+// Heartbeat
+updateJobHeartbeat($pdo, 'RULE_RUNNER', 'OK', 'Starting scheduled rule check');
+
+$now = new DateTimeImmutable('now', new DateTimeZone('Africa/Tunis'));
+$stateDir = __DIR__ . '/.last_runs';
+if (!is_dir($stateDir))
+    mkdir($stateDir, 0755, true);
 
 try {
-    // Get all active scheduled SQL rules
     $stmt = $pdo->prepare("
         SELECT * FROM notification_rules 
-        WHERE condition_type = 'SCHEDULED_SQL' AND is_active = 1
+        WHERE condition_type = 'SCHEDULED_SQL' 
+          AND is_active = 1 
+          AND schedule_expression IS NOT NULL 
+          AND schedule_expression != ''
     ");
     $stmt->execute();
-    
+
     $rules_processed = 0;
     $issues_raised = 0;
-    
+    $rules_triggered = 0;
+
     while ($rule = $stmt->fetch(PDO::FETCH_ASSOC)) {
-        logNotificationActivity("Processing rule: {$rule['code']}", 'INFO');
-        
+        $ruleId = $rule['id'];
+        $code = $rule['code'];
+        $lastRunFile = "$stateDir/rule_{$ruleId}.txt";
+
+        logNotificationActivity("Checking rule: {$code} | Cron: {$rule['schedule_expression']}");
+
         try {
-            // Execute the detection SQL
-            $detection_stmt = $pdo->query($rule['detection_sql']);
-            
+            $cron = CronExpression::factory($rule['schedule_expression']);
+            $lastDue = $cron->getPreviousRunDate($now, 0, true); // DateTimeImmutable
+            $lastDueTs = $lastDue->getTimestamp();
+
+            $lastExecutedTs = file_exists($lastRunFile)
+                ? (int) trim(file_get_contents($lastRunFile))
+                : 0;
+
+            // Optional: respect cooldown even if cron says run
+            $cooldownSec = ($rule['cooldown_minutes'] ?? 60) * 60;
+            $tooSoon = (time() - $lastExecutedTs) < $cooldownSec;
+
+            if ($lastDueTs <= $lastExecutedTs || $tooSoon) {
+                logNotificationActivity("Rule {$code}: not due or in cooldown", 'INFO');
+                continue;
+            }
+
+            logNotificationActivity("Rule {$code}: DUE → executing detection SQL", 'INFO');
+
+            // === RUN DETECTION SQL ===
+            $detection_stmt = $pdo->prepare($rule['detection_sql']);
+            $detection_stmt->execute();
+
             while ($row = $detection_stmt->fetch(PDO::FETCH_ASSOC)) {
-                // Expected columns: entity_id, recipient_user_id, context_json
-                // Optional: custom_title, custom_body
-                
-                $entity_id = $row['entity_id'];
+                $entity_id = $row['entity_id'] ?? null;
                 $recipient_user_id = $row['recipient_user_id'] ?? null;
-                $context_json = $row['context_json'];
+                $context_json = $row['context_json'] ?? '{}';
                 $custom_title = $row['custom_title'] ?? null;
                 $custom_body = $row['custom_body'] ?? null;
-                
-                // Raise the issue
+
+                if (!$entity_id)
+                    continue;
+
                 $engine->raiseIssue(
                     $rule,
                     $entity_id,
@@ -56,26 +90,29 @@ try {
                     $custom_title,
                     $custom_body
                 );
-                
+
                 $issues_raised++;
             }
-            
-            $rules_processed++;
-            
+
+            // Mark as executed
+            file_put_contents($lastRunFile, $lastDueTs);
+            $rules_triggered++;
+
         } catch (Exception $e) {
-            $error_msg = "Error in rule {$rule['code']}: {$e->getMessage()}";
-            logNotificationActivity($error_msg, 'ERROR');
-            updateJobHeartbeat($pdo, 'RULE_RUNNER', 'WARNING', $error_msg);
+            $msg = "Error in rule {$code}: " . $e->getMessage();
+            logNotificationActivity($msg, 'ERROR');
+            updateJobHeartbeat($pdo, 'RULE_RUNNER', 'WARNING', $msg);
         }
+        $rules_processed++;
     }
-    
-    $message = "Processed {$rules_processed} rules, raised {$issues_raised} issues";
-    logNotificationActivity($message, 'INFO');
-    updateJobHeartbeat($pdo, 'RULE_RUNNER', 'OK', $message);
-    
-} catch (Exception $e) {
-    $error_msg = "Fatal error: {$e->getMessage()}";
-    logNotificationActivity($error_msg, 'ERROR');
-    updateJobHeartbeat($pdo, 'RULE_RUNNER', 'ERROR', $error_msg);
+
+    $summary = "Checked: {$rules_processed} | Triggered: {$rules_triggered} | Issues: {$issues_raised}";
+    logNotificationActivity($summary, 'INFO');
+    updateJobHeartbeat($pdo, 'RULE_RUNNER', 'OK', $summary);
+
+} catch (Throwable $e) {
+    $msg = "FATAL: " . $e->getMessage();
+    logNotificationActivity($msg, 'ERROR');
+    updateJobHeartbeat($pdo, 'RULE_RUNNER', 'ERROR', $msg);
     exit(1);
 }
