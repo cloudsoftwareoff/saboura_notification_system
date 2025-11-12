@@ -14,10 +14,6 @@ class AlertsController {
     }
     
 
-    function prepareInClause($pdo, $values) {
-    $placeholders = implode(',', array_fill(0, count($values), '?'));
-    return ['placeholders' => $placeholders, 'values' => $values];
-}
 
     /**
      * Update single issue status

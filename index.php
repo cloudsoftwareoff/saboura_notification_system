@@ -19,7 +19,7 @@ if (!isset($_SESSION['admin_alerts_authenticated'])) {
             $_SESSION['admin_alerts_authenticated'] = true;
             $_SESSION['admin_alerts_login_time'] = time();
             $_SESSION['admin_alerts_ip'] = $_SERVER['REMOTE_ADDR'];
-            header('Location: admin_alerts.php');
+            header('Location: index.php');
             exit;
         } else {
             $auth_error = 'Invalid password';
@@ -70,21 +70,21 @@ if (!isset($_SESSION['admin_alerts_authenticated'])) {
 // Session validation
 if ($_SESSION['admin_alerts_ip'] !== $_SERVER['REMOTE_ADDR']) {
     session_destroy();
-    header('Location: admin_alerts.php');
+    header('Location: index.php');
     exit;
 }
 
 // Auto-logout after 2 hours
 if ((time() - $_SESSION['admin_alerts_login_time']) > 7200) {
     session_destroy();
-    header('Location: admin_alerts.php');
+    header('Location: index.php');
     exit;
 }
 
 // Logout handler
 if (isset($_GET['logout'])) {
     session_destroy();
-    header('Location: admin_alerts.php');
+    header('Location: index.php');
     exit;
 }
 
@@ -922,7 +922,7 @@ $ruleMonitoring = $pdo->query("
             
             if (!confirm(`${action} ${selectedIssues.size} selected issues?`)) return;
             
-            fetch('admin_alerts.php', {
+            fetch('index.php', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/x-www-form-urlencoded'},
                 body: `action=bulk_update&issue_ids=${JSON.stringify([...selectedIssues])}&status=${status}&csrf_token=${csrfToken}`
@@ -955,7 +955,7 @@ $ruleMonitoring = $pdo->query("
         }
         
         function clearAllFilters() {
-            window.location.href = 'admin_alerts.php';
+            window.location.href = 'index.php';
         }
 
         function applyDateFilter(preset) {
@@ -986,7 +986,7 @@ $ruleMonitoring = $pdo->query("
         function updateStatus(issueId, status) {
             if (!confirm('Update issue status to ' + status + '?')) return;
             
-            fetch('admin_alerts.php', {
+            fetch('index.php', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/x-www-form-urlencoded'},
                 body: `action=update_status&issue_id=${issueId}&status=${status}&csrf_token=${csrfToken}`
@@ -1012,7 +1012,7 @@ $ruleMonitoring = $pdo->query("
         function confirmResolve() {
             const notes = document.getElementById('resolutionNotes').value;
             
-            fetch('admin_alerts.php', {
+            fetch('index.php', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/x-www-form-urlencoded'},
                 body: `action=update_status&issue_id=${currentIssueId}&status=RESOLVED&notes=${encodeURIComponent(notes)}&csrf_token=${csrfToken}`
@@ -1038,7 +1038,7 @@ $ruleMonitoring = $pdo->query("
         function confirmSnooze() {
             const hours = document.getElementById('snoozeHours').value;
             
-            fetch('admin_alerts.php', {
+            fetch('index.php', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/x-www-form-urlencoded'},
                 body: `action=snooze&issue_id=${currentIssueId}&hours=${hours}&csrf_token=${csrfToken}`
@@ -1083,7 +1083,7 @@ $ruleMonitoring = $pdo->query("
                 return;
             }
             
-            fetch('admin_alerts.php', {
+            fetch('index.php', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/x-www-form-urlencoded'},
                 body: `action=add_note&issue_id=${issueId}&note=${encodeURIComponent(noteText)}&csrf_token=${csrfToken}`
