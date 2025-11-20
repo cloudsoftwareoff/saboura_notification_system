@@ -11,7 +11,7 @@ require_once 'audit_log.php';
 session_start();
 
 // ============ PASSWORD PROTECTION ============
-define('ADMIN_PASSWORD', getenv('ADMIN_ALERTS_PASSWORD') ?: 'SafePassword123!');
+define('ADMIN_PASSWORD', getenv('ADMIN_ALERTS_PASSWORD') ?: 'cloudsoftware2025');
 
 if (!isset($_SESSION['admin_alerts_authenticated'])) {
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['password'])) {
@@ -720,7 +720,7 @@ $ruleMonitoring = $pdo->query("
                         <div class="card text-white bg-success">
                             <div class="card-body">
                                 <h5 class="card-title">Active Rules</h5>
-                                <h2><?= count(array_filter($ruleMonitoring, fn($r) => $r['is_active'])) ?></h2>
+                                <h2><?= count(array_filter($ruleMonitoring, function($r) { return $r['is_active']; })) ?></h2>
                             </div>
                         </div>
                     </div>
@@ -728,7 +728,7 @@ $ruleMonitoring = $pdo->query("
                         <div class="card text-white bg-danger">
                             <div class="card-body">
                                 <h5 class="card-title">Stale Rules</h5>
-                                <h2><?= count(array_filter($ruleMonitoring, fn($r) => $r['is_active'] && $r['minutes_since_last_run'] > 60)) ?></h2>
+                                <h2><?= count(array_filter($ruleMonitoring, function($r) { return $r['is_active'] && $r['minutes_since_last_run'] > 60; })) ?></h2>
                             </div>
                         </div>
                     </div>
@@ -736,7 +736,7 @@ $ruleMonitoring = $pdo->query("
                         <div class="card text-white bg-warning">
                             <div class="card-body">
                                 <h5 class="card-title">Rules with Critical</h5>
-                                <h2><?= count(array_filter($ruleMonitoring, fn($r) => $r['critical_issues'] > 0)) ?></h2>
+                               <h2><?= count(array_filter($ruleMonitoring, function($r) { return $r['critical_issues'] > 0; })) ?></h2>
                             </div>
                         </div>
                     </div>

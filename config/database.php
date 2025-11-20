@@ -24,7 +24,9 @@ function getDatabaseConnection() {
 }
 
 function getCurrentUserId() {
-  
-    session_start();
+    // Only start session if not already started
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start();
+    }
     return $_SESSION['user_id'] ?? 1;
 }
